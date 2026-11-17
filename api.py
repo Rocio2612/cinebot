@@ -10,30 +10,35 @@ OMDB_API_KEY = os.getenv("OMDB_API_KEY")
 # --- Función 1: Recomendar por género (TMDB) ---
 async def recomendar_por_genero(genero_id: int) -> str:
     """Busca películas populares de un género específico en TMDB."""
-    # language=es-AR para que las sinopsis vengan en español
-    url = f"https://api.themoviedb.org/3/discover/movie?api_key={TMDB_API_KEY}&with_genres={genero_id}&language=es-AR&sort_by=popularity.desc"
-    
+    # Usamos vote_average para que traiga clásicos conocidos y no estrenos raros
+    url = f"https://api.themoviedb.org/3/discover/movie?api_key={TMDB_API_KEY}&with_genres={genero_id}&without_genres=18,80,16&language=es-AR&sort_by=vote_average.desc&vote_count.gte=2000&primary_release_date.lte=2024-12-31"
     async with httpx.AsyncClient() as client:
         try:
             respuesta = await client.get(url)
-            respuesta.raise_for_status() # Lanza error si la respuesta no es 200
+            respuesta.raise_for_status()  # Lanza error si la respuesta no es 200
             datos = respuesta.json()
             
-            peliculas = datos.get("results", [])[:3] # Tomamos las 3 primeras
+            peliculas = datos.get("results", [])[:3]  # Tomamos las 3 primeras
             
             if not peliculas:
                 return "No encontré películas de ese género."
                 
             resultado = []
             for p in peliculas:
-                # Cortamos la sinopsis a 150 caracteres para que no sea eterna
-                sinopsis = p.get('overview', 'Sin sinopsis disponible.')[:150]
+                sinopsis = p.get('overview', 'Sin sinopsis disponible.')
+                
+                # Limpiamos el spam de Vercineo
+                if "Vercineo" in sinopsis or "Busca películas" in sinopsis:
+                    sinopsis = "Sinopsis no disponible en TMDB."
+                else:
+                    sinopsis = sinopsis[:150]
+                    
                 resultado.append(f"- {p['title']} ({p.get('release_date', 'N/A')[:4]}): {sinopsis}...")
             
             return "\n".join(resultado)
+                
         except Exception as e:
             return f"Error al consultar TMDB: {str(e)}"
-
 # --- Función 2: Obtener rating real (OMDb) ---
 async def obtener_rating(titulo: str) -> str:
     """Busca el rating de IMDb y Rotten Tomatoes de una película en OMDb."""

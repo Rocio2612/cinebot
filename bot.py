@@ -177,6 +177,7 @@ async def olvidar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Responde con Gemini, teniendo en cuenta la conversación previa."""
     user_id = update.effective_user.id
     texto = update.message.text
     logger.info("Mensaje de %s: %s", user_id, texto)
@@ -192,12 +193,15 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(describir_error(error))
         return
 
+    # Guardamos en la base de datos
     await db.guardar_intercambio(user_id, texto, respuesta)
 
-    for inicio in range(0, len(respuesta), LIMITE_TELEGRAM):
-        await update.message.reply_text(respuesta[inicio:inicio + LIMITE_TELEGRAM])
-
-
+    # Enviamos a Telegram manejando posibles timeouts de red
+    try:
+        for inicio in range(0, len(respuesta), LIMITE_TELEGRAM):
+            await update.message.reply_text(respuesta[inicio:inicio + LIMITE_TELEGRAM])
+    except Exception as e:
+        logger.warning(f"Error al enviar mensaje a Telegram (posible timeout): {e}")
 async def manejar_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Error no previsto", exc_info=context.error)
 
