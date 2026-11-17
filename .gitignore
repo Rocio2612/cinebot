@@ -1,5 +1,8 @@
-venv/
 .env
+venv/
 __pycache__/
 *.pyc
 *.db
+prueba_gemini.py
+prueba_db.py
+prueba_api.py
