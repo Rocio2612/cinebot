@@ -3,6 +3,7 @@ import logging
 import os
 from dotenv import load_dotenv
 from google import genai
+from pydantic import ValidationError    # error que se produce si el JSON no cumple el esquema
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -14,6 +15,7 @@ from telegram.ext import (
 )
 
 import db
+from analisis import analizar_resena    # análisis estructurado de reseñas
 from api import DECLARACIONES, ejecutar_funcion   # herramientas que el modelo puede pedir
 from prompts import PROMPT_SISTEMA
 
@@ -123,7 +125,9 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Estos son mis comandos:\n\n"
         "/start - Presentación de CineBot\n"
         "/help - Esta ayuda\n"
-        "/olvidar - Borra nuestra conversación y empezamos de cero\n\n"
+        "/olvidar - Borra nuestra conversación y empezamos de cero\n"
+        "/resena <texto> - Dejá tu opinión sobre una película o serie\n"
+        "/resenas - Resumen de las opiniones recibidas\n\n"
         "Y, sobre todo, podés escribirme qué tenés ganas de ver: te recomiendo "
         "películas o series, te cuento de qué trata una o te comento tu reseña. "
         "Me acuerdo de lo que hablamos."
@@ -174,36 +178,59 @@ async def al_iniciar(app: Application) -> None:
 
 
 async def resena(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Analiza el sentimiento de una reseña usando salida estructurada."""
-    # Agarramos el texto que el usuario escribió después del comando /resena
-    texto_resena = " ".join(context.args)
-    
-    if not texto_resena:
-        await update.message.reply_text("Por favor, escribime tu reseña después del comando. Ejemplo: /resena Me encantó la película, los actores estuvieron geniales.")
+    """Responde al comando /resena: analiza la reseña y la guarda."""
+    # context.args contiene las palabras escritas después del comando,
+    # separadas por espacios: "/resena Muy buena" → ["Muy", "buena"].
+    texto = " ".join(context.args).strip()
+    if not texto:
+        await update.message.reply_text(
+            "Escribí tu opinión después del comando. Por ejemplo:\n"
+            "/resena Me encantó la película, los actores estuvieron geniales."
+        )
         return
 
     await update.message.chat.send_action(ChatAction.TYPING)
-    
-    # Le pedimos a Gemini que analice el texto (usando las instrucciones del prompt)
-    prompt_analisis = f"Analizá la siguiente reseña y devolvé solo el JSON estructurado: '{texto_resena}'"
-    
+
     try:
-        # Usamos la función consultar_gemini, pero sin herramientas para que no se confunda
-        # (En un caso ideal, esto iría a una función aparte, pero así es más fácil)
-        interaccion = await cliente_gemini.aio.interactions.create(
-            model=GEMINI_MODEL,
-            system_instruction=PROMPT_SISTEMA,
-            input=prompt_analisis,
-            store=False,
-        )
-        respuesta_json = interaccion.output_text
-        
-        # Le mostramos el JSON crudo al usuario (así se ve la salida estructurada)
-        await update.message.reply_text(f"Análisis de la reseña:\n\n{respuesta_json}")
-        
-    except Exception as e:
-        logger.error("Error al analizar reseña: %s", e)
-        await update.message.reply_text("Hubo un error al analizar la reseña.")
+        analisis = await analizar_resena(cliente_gemini, GEMINI_MODEL, texto)
+    except ValidationError:
+        # El modelo respondió, pero el JSON no cumple el esquema.
+        logger.exception("Análisis de reseña con formato inválido")
+        await update.message.reply_text("No pude analizar tu reseña. ¿Probás escribirla de nuevo? 🙏")
+        return
+    except Exception as error:
+        logger.exception("Error al analizar la reseña")
+        await update.message.reply_text(describir_error(error))
+        return
+
+    await db.guardar_resena(update.effective_user.id, texto, analisis)
+
+    # El análisis es un objeto: sus campos se usan directamente, sin interpretar texto.
+    emoji = {"positivo": "😊", "neutral": "😐", "negativo": "😞"}[analisis.sentimiento]
+    await update.message.reply_text(
+        f"¡Gracias por tu opinión! {emoji}\n\n"
+        f"Sentimiento: {analisis.sentimiento}\n"
+        f"Puntaje: {'⭐' * analisis.puntaje} ({analisis.puntaje}/5)\n"
+        f"Aspectos: {', '.join(analisis.aspectos)}\n"
+        f"Resumen: {analisis.resumen}"
+    )
+
+
+async def resenas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Responde al comando /resenas: muestra el resumen de todas las reseñas."""
+    datos = await db.resumen_resenas()
+    if datos["cantidad"] == 0:
+        await update.message.reply_text("Todavía no recibí reseñas. Podés dejar la tuya con /resena.")
+        return
+
+    conteo = datos["por_sentimiento"]
+    await update.message.reply_text(
+        f"Reseñas recibidas: {datos['cantidad']}\n"
+        f"Puntaje promedio: {datos['promedio']:.1f}/5\n"     # :.1f muestra un decimal
+        f"Positivas: {conteo.get('positivo', 0)} · "
+        f"Neutrales: {conteo.get('neutral', 0)} · "
+        f"Negativas: {conteo.get('negativo', 0)}"
+    )
 
 
 def main() -> None:
@@ -221,8 +248,9 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
     app.add_error_handler(manejar_error)
     app.add_handler(CommandHandler("resena", resena))
+    app.add_handler(CommandHandler("resenas", resenas))
 
-    logger.info("CineBot v4 en línea con el modelo %s.", GEMINI_MODEL)
+    logger.info("CineBot v5 en línea con el modelo %s.", GEMINI_MODEL)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
