@@ -1,3 +1,4 @@
+import json                             # convierte los resultados de las funciones a texto JSON
 import logging
 import os
 from dotenv import load_dotenv
@@ -13,7 +14,7 @@ from telegram.ext import (
 )
 
 import db
-from api import recomendar_por_genero, obtener_rating
+from api import DECLARACIONES, ejecutar_funcion   # herramientas que el modelo puede pedir
 from prompts import PROMPT_SISTEMA
 
 load_dotenv()
@@ -23,6 +24,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 MAX_MENSAJES_HISTORIAL = 20
+
+# Cantidad máxima de vueltas del ciclo de function calling en un mismo mensaje.
+# Evita un bucle infinito si el modelo pidiera funciones una y otra vez.
+MAX_VUELTAS_HERRAMIENTAS = 5
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -36,41 +41,6 @@ LIMITE_TELEGRAM = 4096
 
 cliente_gemini = genai.Client(api_key=GEMINI_API_KEY)
 
-# Herramientas como diccionarios (formato que espera la Interactions API)
-herramientas = [
-    {
-        "type": "function",
-        "name": "recomendar_por_genero",
-        "description": "Busca películas populares según el ID de un género. Usa 27 para terror, 35 para comedia, 28 para acción, 18 para drama, 10749 para romance.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "genero_id": {
-                    "type": "integer",
-                    "description": "El ID numérico del género."
-                }
-            },
-            "required": ["genero_id"]
-        }
-    },
-    {
-        "type": "function",
-        "name": "obtener_rating",
-        "description": "Obtiene el rating de IMDb y Rotten Tomatoes de una película específica.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "titulo": {
-                    "type": "string",
-                    "description": "El título exacto de la película."
-                }
-            },
-            "required": ["titulo"]
-        }
-    }
-]
-
-
 def armar_entrada(historial: list[tuple[str, str]], mensaje_nuevo: str) -> list[dict]:
     tipo_de_paso = {"user": "user_input", "model": "model_output"}
     pasos = [
@@ -82,66 +52,56 @@ def armar_entrada(historial: list[tuple[str, str]], mensaje_nuevo: str) -> list[
 
 
 async def consultar_gemini(historial: list, mensaje_nuevo: str) -> str:
-    try:
-        entrada = armar_entrada(historial, mensaje_nuevo)
+    """
+    Envía la conversación a Gemini y resuelve el ciclo de function calling:
+    mientras el modelo pida funciones, se ejecutan y se le devuelven los
+    resultados; cuando responde con texto, se devuelve ese texto.
+    """
+    # Lista de pasos que se envía al modelo. Empieza con el historial y el
+    # mensaje nuevo, y crece dentro de este turno con los pedidos de funciones
+    # y sus resultados. Esos pasos intermedios no se guardan en la base.
+    entrada = armar_entrada(historial, mensaje_nuevo)
 
-        # 1. Primera llamada: Gemini decide si usar una herramienta
+    for vuelta in range(MAX_VUELTAS_HERRAMIENTAS):
         interaccion = await cliente_gemini.aio.interactions.create(
             model=GEMINI_MODEL,
             system_instruction=PROMPT_SISTEMA,
             input=entrada,
-            tools=herramientas,
+            tools=DECLARACIONES,        # funciones que el modelo puede pedir
             store=False,
         )
 
-        # 2. Buscar si pidió ejecutar una función
-        tool_call = None
-        for step in interaccion.steps:
-            if step.type == "function_call":
-                tool_call = step
-                break
+        # Pasos de tipo function_call: el modelo pide ejecutar una función.
+        # Puede pedir más de una en la misma respuesta.
+        llamadas = [paso for paso in interaccion.steps if paso.type == "function_call"]
 
-        if not tool_call:
-            return interaccion.output_text or "No se me ocurrió nada para responder."
+        if not llamadas:
+            # Sin pedidos de funciones: el modelo ya redactó la respuesta final.
+            return interaccion.output_text or "No se me ocurrió nada para responder 🤔"
 
-        nombre_funcion = tool_call.name
-        argumentos = tool_call.arguments
-        logger.info(f"El modelo pidió ejecutar: {nombre_funcion} con {argumentos}")
+        # Se agregan a la entrada TODOS los pasos que devolvió el modelo, sin
+        # modificarlos (incluidos los de razonamiento interno). La API los
+        # necesita para relacionar cada resultado con su pedido.
+        for paso in interaccion.steps:
+            entrada.append(paso.model_dump())
 
-        # 3. Ejecutar la función real en Python
-        if nombre_funcion == "recomendar_por_genero":
-            resultado_funcion = await recomendar_por_genero(int(argumentos.get("genero_id", 27)))
-        elif nombre_funcion == "obtener_rating":
-            resultado_funcion = await obtener_rating(str(argumentos.get("titulo", "")))
-        else:
-            resultado_funcion = "Función no reconocida."
+        # Se ejecuta cada función pedida y se agrega su resultado como un paso
+        # function_result. call_id debe coincidir con el id del pedido.
+        for llamada in llamadas:
+            resultado = await ejecutar_funcion(llamada.name, llamada.arguments)
+            entrada.append({
+                "type": "function_result",
+                "call_id": llamada.id,
+                "name": llamada.name,
+                # ensure_ascii=False conserva tildes y ñ en lugar de códigos \u
+                "result": [{"type": "text", "text": json.dumps(resultado, ensure_ascii=False)}],
+            })
+        # Se repite el ciclo: el modelo recibe los resultados y decide si
+        # necesita otra función o si ya puede responder.
 
-        logger.info(f"Resultado de la función: {resultado_funcion}")
-
-                # 4. Devolver el resultado a Gemini
-        paso_resultado = {
-            "type": "function_result",
-            "name": nombre_funcion,
-            "call_id": tool_call.id,
-            "result": [{"type": "text", "text": str(resultado_funcion)}]
-        }
-
-        # CLAVE: Volvemos a mandar el historial + el resultado al final
-        entrada_con_resultado = entrada + [paso_resultado]
-
-        interaccion_final = await cliente_gemini.aio.interactions.create(
-            model=GEMINI_MODEL,
-            system_instruction=PROMPT_SISTEMA,
-            input=entrada_con_resultado,  # <--- Historial + resultado
-            tools=herramientas,
-            store=False,
-            previous_interaction_id=interaccion.id
-        )
-
-        return interaccion_final.output_text or "No se me ocurrió nada para responder."
-    except Exception as e:
-        logger.exception("Error detallado en consultar_gemini")
-        return f"Error interno: {str(e)}"
+    # Se agotaron las vueltas sin respuesta final.
+    logger.warning("Se alcanzó el máximo de %d vueltas de herramientas", MAX_VUELTAS_HERRAMIENTAS)
+    return "No pude completar la consulta. ¿Podés reformular la pregunta? 🙏"
 
 
 def describir_error(error: Exception) -> str:
@@ -189,7 +149,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         respuesta = await consultar_gemini(historial, texto)
     except Exception as error:
-        logger.error("Error al consultar a Gemini: %s", error)
+        logger.exception("Error al consultar a Gemini")
         await update.message.reply_text(describir_error(error))
         return
 
@@ -202,6 +162,8 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(respuesta[inicio:inicio + LIMITE_TELEGRAM])
     except Exception as e:
         logger.warning(f"Error al enviar mensaje a Telegram (posible timeout): {e}")
+
+
 async def manejar_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Error no previsto", exc_info=context.error)
 
@@ -209,6 +171,7 @@ async def manejar_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 async def al_iniciar(app: Application) -> None:
     await db.inicializar()
     logger.info("Base de datos lista (%s).", db.RUTA_DB)
+
 
 async def resena(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Analiza el sentimiento de una reseña usando salida estructurada."""
@@ -241,6 +204,8 @@ async def resena(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.error("Error al analizar reseña: %s", e)
         await update.message.reply_text("Hubo un error al analizar la reseña.")
+
+
 def main() -> None:
     faltantes = [nombre for nombre, valor in [("TELEGRAM_TOKEN", TELEGRAM_TOKEN),
                                               ("GEMINI_API_KEY", GEMINI_API_KEY)]
@@ -255,9 +220,9 @@ def main() -> None:
     app.add_handler(CommandHandler("olvidar", olvidar))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
     app.add_error_handler(manejar_error)
-    app.add_handler(CommandHandler("resena", resena)) 
+    app.add_handler(CommandHandler("resena", resena))
 
-    logger.info("CineBot v3 en línea con el modelo %s.", GEMINI_MODEL)
+    logger.info("CineBot v4 en línea con el modelo %s.", GEMINI_MODEL)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
