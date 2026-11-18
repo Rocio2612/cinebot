@@ -43,26 +43,46 @@ LIMITE_TELEGRAM = 4096
 
 cliente_gemini = genai.Client(api_key=GEMINI_API_KEY)
 
-def armar_entrada(historial: list[tuple[str, str]], mensaje_nuevo: str) -> list[dict]:
+def armar_entrada(historial: list[tuple[str, str]], contenido_nuevo: list[dict]) -> list[dict]:
+    """
+    Convierte el historial guardado en la lista de pasos (steps) que espera
+    la Interactions API y agrega al final el contenido nuevo del usuario.
+
+    contenido_nuevo es una lista de bloques: texto, imagen o audio.
+    """
+    # Equivalencia entre el rol guardado en la base y el tipo de paso de la API.
     tipo_de_paso = {"user": "user_input", "model": "model_output"}
+
+    # Un diccionario por cada fila del historial. En el historial, el
+    # contenido es siempre un único bloque de texto.
     pasos = [
         {"type": tipo_de_paso[rol], "content": [{"type": "text", "text": texto}]}
         for rol, texto in historial
     ]
-    pasos.append({"type": "user_input", "content": [{"type": "text", "text": mensaje_nuevo}]})
+
+    # El último paso es lo que el usuario acaba de enviar, tal como llegó:
+    # ya es una lista de bloques, así que no se envuelve en otra lista.
+    pasos.append({"type": "user_input", "content": contenido_nuevo})
     return pasos
 
 
-async def consultar_gemini(historial: list, mensaje_nuevo: str) -> str:
+async def consultar_gemini(
+    historial: list[tuple[str, str]],
+    contenido_nuevo: list[dict],               # antes: mensaje_nuevo: str
+    registro: list[str] | None = None,         # nuevo: lista opcional
+) -> str:
     """
     Envía la conversación a Gemini y resuelve el ciclo de function calling:
     mientras el modelo pida funciones, se ejecutan y se le devuelven los
     resultados; cuando responde con texto, se devuelve ese texto.
+
+    Si se pasa una lista en `registro`, se agrega en ella el nombre de cada
+    función que el modelo pidió (lo usa evaluar.py).
     """
     # Lista de pasos que se envía al modelo. Empieza con el historial y el
-    # mensaje nuevo, y crece dentro de este turno con los pedidos de funciones
+    # contenido nuevo, y crece dentro de este turno con los pedidos de funciones
     # y sus resultados. Esos pasos intermedios no se guardan en la base.
-    entrada = armar_entrada(historial, mensaje_nuevo)
+    entrada = armar_entrada(historial, contenido_nuevo)
 
     for vuelta in range(MAX_VUELTAS_HERRAMIENTAS):
         interaccion = await cliente_gemini.aio.interactions.create(
@@ -90,6 +110,8 @@ async def consultar_gemini(historial: list, mensaje_nuevo: str) -> str:
         # Se ejecuta cada función pedida y se agrega su resultado como un paso
         # function_result. call_id debe coincidir con el id del pedido.
         for llamada in llamadas:
+            if registro is not None:           # nuevo: solo si se pasó una lista
+                registro.append(llamada.name)  # nuevo: anota la herramienta pedida
             resultado = await ejecutar_funcion(llamada.name, llamada.arguments)
             entrada.append({
                 "type": "function_result",
@@ -140,32 +162,45 @@ async def olvidar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Listo, empezamos de cero. ¿Qué tenés ganas de ver? 🍿")
 
 
-async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Responde con Gemini, teniendo en cuenta la conversación previa."""
-    user_id = update.effective_user.id
-    texto = update.message.text
-    logger.info("Mensaje de %s: %s", user_id, texto)
-
+async def procesar_mensaje(update: Update, contenido: list[dict], texto_para_historial: str) -> None:
+    """
+    Pasos comunes a cualquier mensaje (texto, foto o voz): recuperar el
+    historial, consultar al modelo, guardar el intercambio y responder.
+    """
+    user_id = update.effective_user.id                  # identifica de quién es la conversación
     await update.message.chat.send_action(ChatAction.TYPING)
 
+    # Paso 1: recuperar lo que ya se habló con este usuario.
     historial = await db.obtener_historial(user_id, MAX_MENSAJES_HISTORIAL)
 
+    # Paso 2: consultar al modelo con el historial más el contenido nuevo.
     try:
-        respuesta = await consultar_gemini(historial, texto)
+        respuesta = await consultar_gemini(historial, contenido)
     except Exception as error:
-        logger.exception("Error al consultar a Gemini")
+        logger.exception("Error al consultar a Gemini")   # registra el error con la traza completa
         await update.message.reply_text(describir_error(error))
-        return
+        return                                          # si falló, no se guarda nada
 
-    # Guardamos en la base de datos
-    await db.guardar_intercambio(user_id, texto, respuesta)
+    # Paso 3: guardar el intercambio. En la base solo se guarda texto: para
+    # fotos y audios se guarda una descripción breve, no el archivo.
+    await db.guardar_intercambio(user_id, texto_para_historial, respuesta)
 
-    # Enviamos a Telegram manejando posibles timeouts de red
+    # Paso 4: responder, en partes si supera el límite de Telegram, manejando
+    # posibles timeouts de red.
     try:
         for inicio in range(0, len(respuesta), LIMITE_TELEGRAM):
             await update.message.reply_text(respuesta[inicio:inicio + LIMITE_TELEGRAM])
     except Exception as e:
         logger.warning(f"Error al enviar mensaje a Telegram (posible timeout): {e}")
+
+
+async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Responde un mensaje de texto, teniendo en cuenta la conversación previa."""
+    texto = update.message.text
+    logger.info("Mensaje de %s: %s", update.effective_user.id, texto)
+    # El texto se convierte en una lista con un solo bloque. En el historial
+    # se guarda el mismo texto.
+    await procesar_mensaje(update, [{"type": "text", "text": texto}], texto)
 
 
 async def manejar_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -250,7 +285,7 @@ def main() -> None:
     app.add_handler(CommandHandler("resena", resena))
     app.add_handler(CommandHandler("resenas", resenas))
 
-    logger.info("CineBot v5 en línea con el modelo %s.", GEMINI_MODEL)
+    logger.info("CineBot v6 en línea con el modelo %s.", GEMINI_MODEL)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
