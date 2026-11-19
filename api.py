@@ -7,7 +7,7 @@ El módulo tiene tres partes:
      que es lo único que el modelo ve de ellas.
   3. Un despachador que ejecuta la función pedida por el modelo.
 """
-
+import rag
 import logging                          # registro de eventos en la terminal
 import os
 import unicodedata                      # para quitar tildes al comparar nombres
@@ -155,6 +155,11 @@ async def obtener_rating(titulo: str) -> dict:
     }
 
 
+async def buscar_en_guia(consulta: str) -> str:
+    """Llama a la función de búsqueda del módulo RAG."""
+    return await rag.buscar_en_guia(consulta)
+
+
 # ---------------------------------------------------------------------------
 # 3. Declaraciones para el modelo
 # ---------------------------------------------------------------------------
@@ -201,6 +206,24 @@ DECLARACIONES = [
             "required": ["titulo"],
         },
     },
+    {
+        "type": "function",
+        "name": "buscar_en_guia",
+        "description": (
+            "Busca información sobre películas, directores o premios en la guía interna de CineBot. "
+            "Usala cuando el usuario pregunte por datos específicos que no sabés de memoria (trivia, historia del cine, premios)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "consulta": {
+                    "type": "string",
+                    "description": "El tema a buscar en la guía (ej: 'directores de terror', 'películas con más Oscar').",
+                },
+            },
+            "required": ["consulta"],
+        },
+    },
 ]
 
 
@@ -212,6 +235,7 @@ DECLARACIONES = [
 FUNCIONES = {
     "recomendar_por_genero": recomendar_por_genero,
     "obtener_rating": obtener_rating,
+    "buscar_en_guia": buscar_en_guia,  # <--- AGREGADO
 }
 
 
