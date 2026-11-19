@@ -186,4 +186,6 @@ def crear_manejador() -> ConversationHandler:
             CONFIRMACION: [MessageHandler(texto, confirmar)],
         },
         fallbacks=[CommandHandler("cancelar", cancelar)],
+        # Permite que /reservar reinicie el flujo aunque haya una reserva a medias.
+        allow_reentry=True,
     )
