@@ -67,12 +67,14 @@ async def consultar_gemini(
             store=False,
         )
 
-        llamadas = [paso for paso in interaccion.steps if paso.type == "function_call"]
+        # SOLUCIÓN ACÁ: Agregamos (interaccion.steps or [])
+        llamadas = [paso for paso in (interaccion.steps or []) if paso.type == "function_call"]
 
         if not llamadas:
             return interaccion.output_text or "No se me ocurrió nada para responder 🤔"
 
-        for paso in interaccion.steps:
+        # SOLUCIÓN ACÁ: Agregamos (interaccion.steps or [])
+        for paso in (interaccion.steps or []):
             entrada.append(paso.model_dump())
 
         for llamada in llamadas:
