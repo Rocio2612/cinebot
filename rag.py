@@ -5,7 +5,7 @@ from google import genai
 
 RUTA_GUIA = "guia/guia_peliculas.md"
 RUTA_INDICE = "guia/indice.json"
-UMBRAL_SIMILITUD = 0.68
+UMBRAL_SIMILITUD = 0.60
 
 # Variables globales para guardar el índice en memoria
 _fragmentos = []
