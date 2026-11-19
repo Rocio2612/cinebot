@@ -15,6 +15,7 @@ from telegram.ext import (
 )
 
 import db
+import reservas
 from analisis import analizar_resena    # análisis estructurado de reseñas
 from api import DECLARACIONES, ejecutar_funcion   # herramientas que el modelo puede pedir
 from prompts import PROMPT_SISTEMA
@@ -150,6 +151,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/olvidar - Borra nuestra conversación y empezamos de cero\n"
         "/resena <texto> - Dejá tu opinión sobre una película o serie\n"
         "/resenas - Resumen de las opiniones recibidas\n\n"
+        "/reservar - Reservá entradas paso a paso\n"
         "Y, sobre todo, podés escribirme qué tenés ganas de ver: te recomiendo "
         "películas o series, te cuento de qué trata una o te comento tu reseña. "
         "Me acuerdo de lo que hablamos."
@@ -277,13 +279,17 @@ def main() -> None:
 
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(al_iniciar).build()
 
+    app.bot_data["cliente_gemini"] = cliente_gemini
+    app.bot_data["modelo"] = GEMINI_MODEL
+
+    app.add_handler(reservas.crear_manejador())
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", ayuda))
     app.add_handler(CommandHandler("olvidar", olvidar))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
-    app.add_error_handler(manejar_error)
     app.add_handler(CommandHandler("resena", resena))
     app.add_handler(CommandHandler("resenas", resenas))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
+    app.add_error_handler(manejar_error)
 
     logger.info("CineBot v6 en línea con el modelo %s.", GEMINI_MODEL)
     app.run_polling(allowed_updates=Update.ALL_TYPES)

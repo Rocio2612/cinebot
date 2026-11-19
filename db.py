@@ -39,6 +39,16 @@ CREATE TABLE IF NOT EXISTS resenas (
     resumen      TEXT    NOT NULL,
     fecha        TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Reservas de entradas (v6).
+CREATE TABLE IF NOT EXISTS reservas (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id   INTEGER NOT NULL,
+    pelicula  TEXT    NOT NULL,
+    fecha     TEXT    NOT NULL,                     -- fecha de la función, AAAA-MM-DD
+    entradas  INTEGER NOT NULL,
+    creada    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -124,3 +134,13 @@ async def resumen_resenas() -> dict:
         por_sentimiento = dict(await cursor.fetchall())   # [("positivo", 3), ...] → {"positivo": 3, ...}
 
     return {"cantidad": cantidad, "promedio": promedio, "por_sentimiento": por_sentimiento}
+
+async def guardar_reserva(user_id: int, pelicula: str, fecha: str, entradas: int) -> int:
+    """Guarda una reserva confirmada y devuelve su número."""
+    async with aiosqlite.connect(RUTA_DB) as db:
+        cursor = await db.execute(
+            "INSERT INTO reservas (user_id, pelicula, fecha, entradas) VALUES (?, ?, ?, ?)",
+            (user_id, pelicula, fecha, entradas),
+        )
+        await db.commit()
+        return cursor.lastrowid
